@@ -1,0 +1,75 @@
+Experiment 3 - Auto Scaling trigger comparison, raw evidence
+===============================================================
+
+SETUP: gateway_requests_per_target=20 (default 100), backend_cpu_target=30
+(default 60), applied via `aws application-autoscaling put-scaling-policy`
+directly against both existing policies (gateway-requests-per-target,
+backend-cpu) -- pure Application Auto Scaling config, no container/image
+change, so no Docker rebuild needed. Baseline confirmed 2/2 running for
+both services before starting. 10-minute Locust run: 200 users, ramp 20/s,
+GET /files for a mix of 10KB/100KB/1MB files, against the gateway ALB.
+
+LOCUST RESULT (scaling-test_stats.csv):
+  21,359 total requests, 21,048 failures (98.56%)
+  20,750 x LocustBadStatusCode(503), 302 x LocustBadStatusCode(504)
+  Median latency 5100ms, average 5407ms, max 29209ms
+  Steady throughput ~35-37 req/s for the full 10 minutes (not increasing --
+  the 200 users were saturated almost immediately by multi-second response
+  times, so request rate plateaued rather than ramping further)
+
+SCALING TIMELINE (scaling_timeline.csv, watch_scaling.sh polling every 10s):
+  Both services held at 2/2 (desired/running) from load start through
+  ~5:52 elapsed.
+  Backend desiredCount 2->4 first observed at 2026-11-01T20:26:33Z
+    (T+5:52 from Locust start at 20:20:55Z / watcher start at 20:20:41Z)
+    backend runningCount reached 4 at 2026-11-01T20:27:05Z (T+6:24)
+  Gateway desiredCount 2->4 first observed at 2026-11-01T20:26:49Z
+    (T+6:08 -- 16 seconds AFTER backend's desiredCount bump)
+    gateway runningCount reached 4 at 2026-11-01T20:27:38Z (T+6:57)
+  Both services held at 4/4 (their configured max_capacity) for the
+  remainder of the observed window (through T+10:02); neither was given
+  room in this config to scale further.
+
+RAW CLOUDWATCH METRICS (1-minute granularity, AWS/ECS CPUUtilization for
+backend, AWS/ApplicationELB RequestCountPerTarget for gateway's target
+group), covering 20:19:00Z-20:28:00Z:
+
+  Backend CPUUtilization (Average, %):
+    20:19:00  0.20   (idle baseline)
+    20:20:00  0.19   (idle baseline)
+    20:21:00  52.28  <- breached 30% target within ~1 min of load starting
+    20:22:00  63.87
+    20:23:00  61.72
+    20:24:00  66.54
+    20:25:00  73.69
+    20:26:00  33.92  <- averaged across more tasks once scale-out landed
+    20:27:00  38.59
+
+  Gateway RequestCountPerTarget (Sum, per target per minute):
+    20:19:00     0.0   (idle baseline)
+    20:20:00     2.5   (idle baseline)
+    20:21:00  1040.0  <- ~52x the target of 20, within ~1 min of load starting
+    20:22:00  1108.5
+    20:23:00  1099.5
+    20:24:00  1107.5
+    20:25:00  1098.0
+    20:26:00  1109.0
+    20:27:00   779.0  <- dropped once scale-out landed (load spread over
+                          more targets)
+
+KEY OBSERVATION: both metrics breached their configured targets almost
+immediately (within ~60-70 seconds of load starting) and by enormous
+margins (CPU ~1.7-2.5x over target; request count ~50x over target) --
+yet the actual scaling ACTION (desiredCount increase) for both services
+did not happen until ~5.5-6 minutes later, and the two services' scale-out
+moments were only 16 seconds apart despite being driven by conceptually
+very different metric types. This is inconsistent with the naive
+expectation that a direct, per-target request-rate metric (ALB) should
+react meaingfully faster than an aggregate CPU percentage used as an
+NLB substitute -- in this run, the backend (CPU-driven) actually crossed
+the scale-out decision point slightly BEFORE the gateway (request-rate
+driven). The dominant factor in the ~5.5-6 minute delay for both appears
+to be AWS Application Auto Scaling's own target-tracking alarm mechanics
+(which require a sustained breach across multiple CloudWatch evaluation
+periods before acting, specifically to avoid flapping on short spikes),
+not any meaningful difference between the two metric types themselves.

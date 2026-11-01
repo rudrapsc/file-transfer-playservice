@@ -1,0 +1,19 @@
+Sample backend CloudWatch log lines (/ecs/file-transfer-backend) during
+the 70% configured loss test, showing the RETY protocol in action for
+size-10kb.bin (160 chunks):
+
+DEBUG: Processing command "RETY"
+DEBUG: Processing RETY for file: "size-10kb.bin" chunk 38
+DEBUG: Processing command "RETY"
+DEBUG: Processing RETY for file: "size-10kb.bin" chunk 49
+DEBUG: Processing command "RETY"
+DEBUG: Processing RETY for file: "size-10kb.bin" chunk 9
+DEBUG: Processing command "RETY"
+DEBUG: Processing RETY for file: "size-10kb.bin" chunk 44
+[... many more RETY lines for different chunks ...]
+
+Over 11,500 RETY-related log lines were generated across the full
+loss sweep (30/50/70% levels combined, filtered over the test window),
+confirming the retry mechanism is working exactly as designed --
+each lost/corrupted chunk individually triggers a RETY request for
+that specific chunk number, not a full-transfer restart.

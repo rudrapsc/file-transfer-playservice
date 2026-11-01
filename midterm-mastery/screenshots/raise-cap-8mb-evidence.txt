@@ -1,0 +1,48 @@
+Experiment 2 - raise-cap patch, 8MB fetch evidence
+====================================================
+
+PATCH APPLIED: transfer-client/udp/udp-client.go
+  const maxChunks = 65536   // 4 MiB   ->   131072  // 8 MiB
+Rebuilt, pushed, redeployed via scripts/deploy.sh --yes (image tag 20261101145417).
+
+RESULT: fetched size-8mb-at-new-cap.bin (8,388,608 bytes, 131072 chunks) 5 times
+against the patched gateway at 0% configured loss. ALL 5 attempts failed.
+
+filename,bytes,attempt,http_status,latency_seconds
+size-8mb-at-new-cap.bin,8388608,1,504,48.110
+size-8mb-at-new-cap.bin,8388608,2,504,44.025
+size-8mb-at-new-cap.bin,8388608,3,504,56.235
+size-8mb-at-new-cap.bin,8388608,4,504,55.212
+size-8mb-at-new-cap.bin,8388608,5,504,47.108
+
+ROOT CAUSE, confirmed via CloudWatch logs for the same time window:
+
+- Gateway log group (/ecs/file-transfer-gateway) -- the gateway plays the UDP
+  CLIENT role against the backend, so this is where transfer-client's own
+  "Missing chunks ..., retrying" and ErrIncomplete logging actually lands
+  (NOT the backend's log group -- a correction from this experiment's first
+  pass, which looked in the wrong log group and saw 0 matches):
+    - 25 "Missing chunks [...], retrying" lines (RETY rounds being used)
+    - 5 "gave up with chunks still missing" lines (transfer-client's
+      ErrIncomplete, udp-client.go line 50) -- exactly one per attempt.
+      Every single fetch exhausted the full 5-round RETY budget and still
+      came back incomplete.
+
+- Backend log group (/ecs/file-transfer-backend) -- same ~5-6 minute window:
+    - 73,154 "DEBUG: Overloaded: dropped incoming datagram" lines (server.go's
+      non-blocking job-queue-full drop path). For comparison, Experiment 1's
+      entire 30/50/70% loss sweep (30 fetches of a 10KB file) produced "only"
+      11,500+ RETY-related lines total -- a single 8MB fetch attempt (131,072
+      chunks, double the old 4MB cap) generates far more self-inflicted RETY
+      traffic than the whole packet-loss sweep combined, which overwhelms the
+      backend's fixed 8-worker/32-deep queue almost continuously.
+
+TAKEAWAY: raising maxChunks is a real, working, one-line change -- the
+gateway happily accepts and tries to assemble an 8MB response, where the
+unmodified client would have rejected it outright. But the protocol's
+actual reliability ceiling sits well BELOW the cap: this service's fixed
+worker-pool/retry-budget design (same mechanism documented in Experiments 1
+and 2's main findings) cannot reliably move a file this large even at 0%
+configured network loss. Raising the cap and fixing the underlying
+reliability limit are two separate problems -- this experiment demonstrates
+both halves of that distinction with real, reproducible data.

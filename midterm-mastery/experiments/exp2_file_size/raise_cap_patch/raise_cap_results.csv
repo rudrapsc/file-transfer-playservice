@@ -1,0 +1,6 @@
+filename,bytes,attempt,http_status,latency_seconds
+size-8mb-at-new-cap.bin,8388608,1,504,48.110
+size-8mb-at-new-cap.bin,8388608,2,504,44.025
+size-8mb-at-new-cap.bin,8388608,3,504,56.235
+size-8mb-at-new-cap.bin,8388608,4,504,55.212
+size-8mb-at-new-cap.bin,8388608,5,504,47.108

@@ -25,7 +25,7 @@ import (
 const (
 	maxRetryRounds  = 5
 	maxOpenAttempts = 5
-	maxChunks       = 65536
+	maxChunks       = 131072
 )
 
 // readTimeout is how long the server may stay quiet. It is a variable only so tests can

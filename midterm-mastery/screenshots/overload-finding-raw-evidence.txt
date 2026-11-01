@@ -1,0 +1,63 @@
+=== Finding: worker-queue overload causes failures even at 0% CONFIGURED loss ===
+
+Discovered while trying to run Experiment 1's original 500KB test file
+against the 0%-loss baseline deployment.
+
+--- curl results against the live gateway, 0% configured loss ---
+loss-test-500kb.bin (500KB, ~7800 chunks): 4/4 attempts -> HTTP 504, ~16s latency
+size-1mb.bin        (1MB,   ~16384 chunks): HTTP 504, 18.9s latency
+size-100kb.bin      (100KB, ~1600 chunks):  HTTP 504, 13.9s latency
+size-10kb.bin       (10KB,  ~160 chunks):   HTTP 200, 2.4s latency  <- reliable
+thresh-20kb.bin     (20KB,  ~320 chunks):   HTTP 200, 4.7s latency
+thresh-30kb.bin     (30KB,  ~480 chunks):   HTTP 200, 2.8s latency
+thresh-50kb.bin     (50KB,  ~800 chunks):   HTTP 504, 13.5s latency  <- failed
+thresh-70kb.bin     (70KB,  ~1120 chunks):  HTTP 200, 7.1s latency  <- succeeded again
+
+Note the NON-monotonic pattern (30KB and 70KB succeed, 50KB fails in
+between) -- this rules out a hard size cutoff and confirms the failure
+is PROBABILISTIC, driven by transient queue-full moments, not a fixed
+threshold.
+
+size-10kb.bin repeated 5x in isolation: 5/5 success (confirms it as a
+clean, reliable baseline for Experiment 1's loss sweep).
+
+--- Root cause, from transfer-server/protocol/server.go (Serve()) ---
+  jobs := make(chan job, workers*4)   // workers defaults to 8 -> 32-deep queue
+  ...
+  select {
+  case jobs <- job{message: message, from: from}:
+  default:
+      printDebugMessage("Overloaded: dropped incoming datagram")
+  }
+
+This is DELIBERATE, documented behavior (see the function's own doc
+comment: "just as a real network drops datagrams when overloaded; the
+client's timeout and RETY logic cover it"), not a bug. But in practice,
+for files large enough to generate a burst of RETY traffic, a SINGLE
+client's own retries can themselves saturate the 32-slot queue, and if
+that happens enough times to exhaust the client's fixed 5-retry-round
+budget, the transfer fails outright -- all with ZERO injected loss.
+
+--- Sample CloudWatch backend log lines (0% configured loss, 500KB file) ---
+Listening on UDP port 8080 (health check on TCP port 8081) with 8 workers
+DEBUG: Processing command "OPEN"
+DEBUG: Processing OPEN for file: "loss-test-500kb.bin"
+DEBUG: Processing command "RETY"
+DEBUG: Processing RETY for file: "loss-test-500kb.bin" chunk 168
+DEBUG: Overloaded: dropped incoming datagram
+DEBUG: Overloaded: dropped incoming datagram
+DEBUG: Processing command "RETY"
+DEBUG: Processing RETY for file: "loss-test-500kb.bin" chunk 169
+DEBUG: Overloaded: dropped incoming datagram
+[... many more "Overloaded" lines interleaved with RETY processing ...]
+
+--- Why this matters ---
+This is exactly the kind of thing the assignment is pointing at with
+"How many requests can be inflight for the gateway and the backend
+separately?" -- except it turns out to matter WITHON a single client's
+transfer of one large file, not just under concurrent multi-client load.
+It also means Experiment 2's original plan (sweep file size 10KB->4MB at
+0% loss, expecting smooth scaling up to the documented 4MB protocol cap)
+needs reframing: the REAL ceiling most students will hit first is this
+worker-queue overload, well before the documented maxChunks=65536 (4MB)
+limit.

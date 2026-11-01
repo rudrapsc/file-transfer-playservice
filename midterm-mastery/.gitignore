@@ -1,0 +1,3 @@
+# Synthetic test files are large and fully regenerable by the
+# generate_*.sh scripts in each experiment folder -- no need to commit them.
+*.bin
